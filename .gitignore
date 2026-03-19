@@ -1,4 +1,6 @@
 .env
 __pycache__/
+logs/*.csv
 *.pyc
 venv/
+*.pem

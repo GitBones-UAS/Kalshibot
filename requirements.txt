@@ -1,0 +1,7 @@
+kalshi-python>=2.1.0
+python-dotenv
+requests
+cryptography
+python-telegram-bot
+aiohttp
+pytest
