@@ -17,6 +17,13 @@ TRADE_HEADERS = [
     "count", "order_id", "status", "fees_cents", "notes",
 ]
 
+MULTI_ARB_CSV = os.path.join(LOGS_DIR, "multi_arb_signals.csv")
+MULTI_ARB_HEADERS = [
+    "timestamp", "event_ticker", "event_title", "num_markets",
+    "total_yes_cost_cents", "gross_spread_cents", "fee_cents",
+    "net_profit_cents", "roi_percent", "min_volume", "markets",
+]
+
 ERROR_LOG = os.path.join(LOGS_DIR, "errors.log")
 
 
@@ -56,6 +63,17 @@ class TradeLogger:
         ])
 
 
+class MultiArbLogger:
+    def log(self, event_ticker, event_title, num_markets, total_yes_cost_cents,
+            gross_spread_cents, fee_cents, net_profit_cents, roi_percent,
+            min_volume, markets_summary):
+        _append_row(MULTI_ARB_CSV, MULTI_ARB_HEADERS, [
+            _now(), event_ticker, event_title, num_markets,
+            total_yes_cost_cents, gross_spread_cents, fee_cents,
+            net_profit_cents, roi_percent, min_volume, markets_summary,
+        ])
+
+
 def log_error(message):
     with open(ERROR_LOG, "a") as f:
         f.write(f"[{_now()}] {message}\n")
@@ -63,3 +81,4 @@ def log_error(message):
 
 signal_logger = SignalLogger()
 trade_logger = TradeLogger()
+multi_arb_logger = MultiArbLogger()

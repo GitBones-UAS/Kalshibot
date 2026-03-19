@@ -78,6 +78,19 @@ class KalshiAPI:
     def delete(self, path):
         return self._request("DELETE", path)
 
+    def get_balance(self) -> float:
+        data = self.get("/portfolio/balance")
+        balance_cents = data.get("balance", 0)
+        return balance_cents / 100.0
+
+    def get_positions(self) -> list[dict]:
+        data = self.get("/portfolio/positions")
+        return data.get("market_positions", [])
+
+    def get_orders(self, status: str = "resting") -> list[dict]:
+        data = self.get("/portfolio/orders", params={"status": status})
+        return data.get("orders", [])
+
     def get_public(self, path, params=None):
         self._rate_limiter.wait()
         url = self.base_url + path
