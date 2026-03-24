@@ -1,13 +1,18 @@
 import argparse
 import asyncio
 import os
+import time
 from datetime import datetime, timezone
 
+import requests
 from config import config
 from kalshi_client import KalshiAPI
 from scanner import MarketScanner
 from arb_engine import ArbEngine
 from multi_arb import MultiArbScanner
+from executor import TradeExecutor
+from risk_manager import RiskManager
+from alerts import AlertManager
 from logger import signal_logger, multi_arb_logger, log_error
 
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
@@ -29,9 +34,92 @@ def print_banner():
     print("=" * 45)
 
 
-def run_scan_cycle(scanner: MarketScanner, engine: ArbEngine):
+def cancel_all_orders(api: KalshiAPI, executor: TradeExecutor, alerts: AlertManager):
+    orders = api.get_orders(status="resting")
+    if not orders:
+        return
+    cancelled = 0
+    for order in orders:
+        order_id = order.get("order_id", "")
+        if order_id:
+            executor.cancel_order(order_id)
+            cancelled += 1
+    if cancelled:
+        alerts.send_alert(f"Kill switch: cancelled {cancelled} open orders")
+        print(f"  Kill switch: cancelled {cancelled} open orders")
+
+
+class TelegramPoller:
+    def __init__(self, token: str, chat_id: str):
+        self.token = token
+        self.chat_id = chat_id
+        self.enabled = bool(token and chat_id)
+        self.last_update_id = 0
+
+    def poll_commands(self) -> list[str]:
+        if not self.enabled:
+            return []
+        try:
+            url = f"https://api.telegram.org/bot{self.token}/getUpdates"
+            resp = requests.get(url, params={
+                "offset": self.last_update_id + 1,
+                "timeout": 0,
+            }, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            commands = []
+            for update in data.get("result", []):
+                self.last_update_id = update["update_id"]
+                msg = update.get("message", {})
+                if str(msg.get("chat", {}).get("id", "")) != self.chat_id:
+                    continue
+                text = msg.get("text", "").strip().lower()
+                if text.startswith("/"):
+                    commands.append(text)
+            return commands
+        except Exception as e:
+            log_error(f"TelegramPoller.poll_commands: {e}")
+            return []
+
+
+def handle_telegram_commands(poller: TelegramPoller, risk: RiskManager,
+                             api: KalshiAPI, executor: TradeExecutor,
+                             alerts: AlertManager):
+    commands = poller.poll_commands()
+    for cmd in commands:
+        if cmd == "/kill":
+            risk.activate_kill_switch("manual via Telegram")
+            cancel_all_orders(api, executor, alerts)
+            alerts.send_alert("KILL SWITCH ACTIVATED (manual)")
+            print("  Telegram command: /kill")
+        elif cmd == "/status":
+            status = risk.get_status()
+            msg = (
+                f"STATUS\n"
+                f"Trades: {status['daily_trade_count']}/{status['max_daily_trades']}\n"
+                f"PnL: ${status['daily_pnl']:.2f}\n"
+                f"Open positions: {status['open_positions']}\n"
+                f"Exposure: ${status['total_exposure']:.2f}\n"
+                f"Kill switch: {'ON - ' + status['kill_reason'] if status['kill_switch'] else 'OFF'}\n"
+                f"Failures: {status['consecutive_failures']}"
+            )
+            alerts.send_alert(msg)
+            print("  Telegram command: /status")
+        elif cmd == "/resume":
+            risk.deactivate_kill_switch()
+            alerts.send_alert("Kill switch deactivated. Bot resumed.")
+            print("  Telegram command: /resume")
+
+
+def run_scan_cycle(scanner: MarketScanner, engine: ArbEngine, executor: TradeExecutor,
+                   risk: RiskManager, alerts: AlertManager, api: KalshiAPI):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     print(f"\n[{now}] Scanning markets...")
+
+    risk.check_balance(api)
+    if risk.kill_switch:
+        print(f"  Kill switch active: {risk.kill_reason}")
+        return
 
     markets = scanner.fetch_all_open_markets()
     print(f"  Fetched {len(markets)} open markets")
@@ -57,10 +145,37 @@ def run_scan_cycle(scanner: MarketScanner, engine: ArbEngine):
             action="ARB_DETECTED",
         )
 
+        try:
+            alerts.send_opportunity_alert(opp)
+        except Exception as e:
+            log_error(f"Alert failed for {m.ticker}: {e}")
+
+        size_usd = config.MAX_POSITION_SIZE
+        can, reason = risk.can_trade(size_usd)
+
+        if can:
+            try:
+                result = executor.execute_arb_trade(opp, size_usd)
+                status = result.get("status", "unknown")
+                alerts.send_trade_result(m.ticker, status, f"count={result.get('count', 0)}")
+                if status in ("submitted", "dry_run"):
+                    risk.record_trade(m.ticker, size_usd)
+                elif status == "error":
+                    risk.record_failure()
+                print(f"    Trade {status}: {m.ticker} x{result.get('count', 0)}")
+            except Exception as e:
+                risk.record_failure()
+                log_error(f"Trade execution failed for {m.ticker}: {e}")
+                alerts.send_error_alert(f"Trade execution failed: {m.ticker} - {e}")
+        else:
+            print(f"    Risk blocked {m.ticker}: {reason}")
+
+    if risk.kill_switch:
+        cancel_all_orders(api, executor, alerts)
+        alerts.send_error_alert(f"Auto kill switch: {risk.kill_reason}")
+
     if opportunities:
-        print(f"  Found {len(opportunities)} binary arb opportunities:")
-        for opp in opportunities:
-            print(f"    {engine.format_opportunity(opp)}")
+        print(f"  Found {len(opportunities)} binary arb opportunities")
     else:
         print("  No binary arb opportunities found.")
 
@@ -126,11 +241,19 @@ async def main():
     scanner = MarketScanner(api)
     engine = ArbEngine()
     multi_scanner = MultiArbScanner(api)
+    executor = TradeExecutor(api=api, dry_run=config.DRY_RUN)
+    risk = RiskManager()
+    alerts = AlertManager()
+    poller = TelegramPoller(config.TELEGRAM_TOKEN, config.TELEGRAM_CHAT_ID)
 
     print_banner()
 
+    mode = "DRY_RUN" if config.DRY_RUN else "LIVE"
+    env = "DEMO" if config.IS_DEMO else "PRODUCTION"
+    alerts.send_alert(f"Bot started. Mode: {mode}. Environment: {env}")
+
     if args.scan_once:
-        run_scan_cycle(scanner, engine)
+        run_scan_cycle(scanner, engine, executor, risk, alerts, api)
         run_multi_arb_cycle(multi_scanner)
         print("\nSingle scan complete.")
         return
@@ -138,19 +261,29 @@ async def main():
     print(f"Starting continuous scan (every {config.SCAN_INTERVAL}s)...")
     print("Press Ctrl+C to stop.\n")
 
+    last_summary = time.monotonic()
+
     try:
         while True:
             try:
-                run_scan_cycle(scanner, engine)
+                handle_telegram_commands(poller, risk, api, executor, alerts)
+                run_scan_cycle(scanner, engine, executor, risk, alerts, api)
                 run_multi_arb_cycle(multi_scanner)
             except KeyboardInterrupt:
                 raise
             except Exception as e:
                 log_error(f"main loop: {e}")
                 print(f"  Error during scan: {e}")
+                alerts.send_error_alert(f"Scan error: {e}")
+
+            if time.monotonic() - last_summary >= 86400:
+                alerts.send_daily_summary(risk.get_status())
+                last_summary = time.monotonic()
+
             await asyncio.sleep(config.SCAN_INTERVAL)
     except KeyboardInterrupt:
         print("\n\nShutting down gracefully...")
+        alerts.send_alert("Bot stopped.")
 
 
 if __name__ == "__main__":

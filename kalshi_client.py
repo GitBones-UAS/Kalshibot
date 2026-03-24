@@ -62,7 +62,7 @@ class KalshiAPI:
         url = self.base_url + path
         headers = self._get_headers(method, path)
         try:
-            resp = requests.request(method, url, headers=headers, params=params, json=data)
+            resp = requests.request(method, url, headers=headers, params=params, json=data, timeout=15)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -95,7 +95,7 @@ class KalshiAPI:
         self._rate_limiter.wait()
         url = self.base_url + path
         try:
-            resp = requests.get(url, params=params)
+            resp = requests.get(url, params=params, timeout=15)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:

@@ -26,7 +26,7 @@ class MultiArbScanner:
     def __init__(self, api: KalshiAPI):
         self.api = api
 
-    def fetch_multi_outcome_events(self, limit=200) -> list[dict]:
+    def fetch_multi_outcome_events(self, limit=200, max_events=20) -> list[dict]:
         events = []
         cursor = None
 
@@ -67,6 +67,9 @@ class MultiArbScanner:
                     })
 
                 time.sleep(0.1)
+
+            if max_events and len(events) >= max_events:
+                break
 
             cursor = data.get("cursor")
             if not cursor:
