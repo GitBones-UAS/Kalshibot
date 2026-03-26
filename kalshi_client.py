@@ -31,6 +31,7 @@ class KalshiAPI:
             with open(private_key_path, "rb") as f:
                 self._private_key = serialization.load_pem_private_key(f.read(), password=None)
         self._rate_limiter = RateLimiter(max_per_second=10)
+        self._session = requests.Session()
 
     def _sign_request(self, timestamp_ms, method, path):
         message = str(timestamp_ms) + method + path
@@ -62,7 +63,7 @@ class KalshiAPI:
         url = self.base_url + path
         headers = self._get_headers(method, path)
         try:
-            resp = requests.request(method, url, headers=headers, params=params, json=data, timeout=15)
+            resp = self._session.request(method, url, headers=headers, params=params, json=data, timeout=15)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -91,11 +92,15 @@ class KalshiAPI:
         data = self.get("/portfolio/orders", params={"status": status})
         return data.get("orders", [])
 
+    def get_order(self, order_id: str) -> dict:
+        data = self.get(f"/portfolio/orders/{order_id}")
+        return data.get("order", {})
+
     def get_public(self, path, params=None):
         self._rate_limiter.wait()
         url = self.base_url + path
         try:
-            resp = requests.get(url, params=params, timeout=15)
+            resp = self._session.get(url, params=params, timeout=15)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:

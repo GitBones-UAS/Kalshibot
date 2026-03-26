@@ -1,4 +1,4 @@
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from kalshi_client import KalshiAPI
@@ -26,7 +26,14 @@ class MultiArbScanner:
     def __init__(self, api: KalshiAPI):
         self.api = api
 
-    def fetch_multi_outcome_events(self, limit=200, max_events=20) -> list[dict]:
+    def _fetch_event_detail(self, event_ticker: str) -> dict:
+        try:
+            return self.api.get_public(f"/events/{event_ticker}")
+        except Exception as e:
+            log_error(f"MultiArbScanner.fetch_event({event_ticker}): {e}")
+            return {}
+
+    def fetch_multi_outcome_events(self, limit=200, max_events=20, max_workers=5) -> list[dict]:
         events = []
         cursor = None
 
@@ -45,28 +52,28 @@ class MultiArbScanner:
             if not batch:
                 break
 
-            for event in batch:
-                event_ticker = event.get("event_ticker", "")
-                if not event_ticker:
-                    continue
+            event_tickers = [
+                (e.get("event_ticker", ""), e.get("title", ""))
+                for e in batch if e.get("event_ticker")
+            ]
 
-                try:
-                    detail = self.api.get_public(f"/events/{event_ticker}")
-                except Exception as e:
-                    log_error(f"MultiArbScanner.fetch_event({event_ticker}): {e}")
-                    continue
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(self._fetch_event_detail, ticker): (ticker, title)
+                    for ticker, title in event_tickers
+                }
+                for future in as_completed(futures):
+                    ticker, title = futures[future]
+                    detail = future.result()
+                    event_markets = detail.get("markets", [])
+                    open_markets = [m for m in event_markets if m.get("status") == "open"]
 
-                event_markets = detail.get("markets", [])
-                open_markets = [m for m in event_markets if m.get("status") == "open"]
-
-                if len(open_markets) >= 3:
-                    events.append({
-                        "event_ticker": event_ticker,
-                        "title": event.get("title", ""),
-                        "markets": open_markets,
-                    })
-
-                time.sleep(0.1)
+                    if len(open_markets) >= 3:
+                        events.append({
+                            "event_ticker": ticker,
+                            "title": title,
+                            "markets": open_markets,
+                        })
 
             if max_events and len(events) >= max_events:
                 break
@@ -74,7 +81,6 @@ class MultiArbScanner:
             cursor = data.get("cursor")
             if not cursor:
                 break
-            time.sleep(0.2)
 
         return events
 

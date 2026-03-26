@@ -179,31 +179,29 @@ class TestFormat:
 
 class TestFetchMultiOutcomeEvents:
     def test_fetches_and_filters(self, scanner, mock_api):
-        mock_api.get_public.side_effect = [
-            # First call: GET /events
-            {
+        responses = {
+            "/events": {
                 "events": [
                     {"event_ticker": "EVT-3WAY", "title": "3-way race"},
                     {"event_ticker": "EVT-BINARY", "title": "Yes/No"},
                 ],
                 "cursor": None,
             },
-            # Second call: GET /events/EVT-3WAY
-            {
+            "/events/EVT-3WAY": {
                 "markets": [
                     {"ticker": "A", "title": "A", "yes_bid": 30, "volume": 10, "status": "open"},
                     {"ticker": "B", "title": "B", "yes_bid": 30, "volume": 10, "status": "open"},
                     {"ticker": "C", "title": "C", "yes_bid": 30, "volume": 10, "status": "open"},
                 ],
             },
-            # Third call: GET /events/EVT-BINARY
-            {
+            "/events/EVT-BINARY": {
                 "markets": [
                     {"ticker": "Y", "title": "Yes", "yes_bid": 60, "volume": 10, "status": "open"},
                     {"ticker": "N", "title": "No", "yes_bid": 40, "volume": 10, "status": "open"},
                 ],
             },
-        ]
+        }
+        mock_api.get_public.side_effect = lambda path, **kwargs: responses.get(path, {})
         events = scanner.fetch_multi_outcome_events()
         assert len(events) == 1  # only 3+ markets
         assert events[0]["event_ticker"] == "EVT-3WAY"

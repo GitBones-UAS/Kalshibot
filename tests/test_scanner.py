@@ -1,3 +1,4 @@
+import time
 import pytest
 from unittest.mock import MagicMock, patch
 from scanner import MarketScanner, KalshiMarket
@@ -199,3 +200,131 @@ class TestPagination:
         assert all_markets[0].ticker == "P1"
         assert all_markets[1].ticker == "P2"
         assert mock_api.get_public.call_count == 2
+
+
+# ── 6. Multi-page fetch with cursor chaining ──
+
+class TestMultiPageFetch:
+    def test_three_page_pagination(self, scanner, mock_api):
+        """Verify fetch_all_open_markets chains cursors across 3 pages."""
+        page1 = {"markets": [_make_raw_market(ticker="P1-A"),
+                              _make_raw_market(ticker="P1-B")], "cursor": "cur1"}
+        page2 = {"markets": [_make_raw_market(ticker="P2-A")], "cursor": "cur2"}
+        page3 = {"markets": [_make_raw_market(ticker="P3-A"),
+                              _make_raw_market(ticker="P3-B")], "cursor": None}
+        mock_api.get_public.side_effect = [page1, page2, page3]
+
+        all_markets = scanner.fetch_all_open_markets()
+
+        assert len(all_markets) == 5
+        assert [m.ticker for m in all_markets] == ["P1-A", "P1-B", "P2-A", "P3-A", "P3-B"]
+        assert mock_api.get_public.call_count == 3
+
+    def test_stops_on_empty_page(self, scanner, mock_api):
+        """Pagination stops when a page returns no markets."""
+        page1 = {"markets": [_make_raw_market(ticker="M1")], "cursor": "cur1"}
+        page2 = {"markets": [], "cursor": "cur2"}
+        mock_api.get_public.side_effect = [page1, page2]
+
+        all_markets = scanner.fetch_all_open_markets()
+        assert len(all_markets) == 1
+        assert mock_api.get_public.call_count == 2
+
+    def test_single_page_no_cursor(self, scanner, mock_api):
+        """Single page with no cursor returns all markets."""
+        mock_api.get_public.return_value = {
+            "markets": [_make_raw_market(ticker=f"M{i}") for i in range(3)],
+            "cursor": None,
+        }
+        all_markets = scanner.fetch_all_open_markets()
+        assert len(all_markets) == 3
+        assert mock_api.get_public.call_count == 1
+
+
+# ── 7. Market data caching ──
+
+class TestMarketCache:
+    def test_cache_returns_same_data_without_api_call(self, mock_api):
+        scanner = MarketScanner(mock_api, cache_ttl=30.0)
+        mock_api.get_public.return_value = {
+            "markets": [_make_raw_market(ticker="CACHED")],
+            "cursor": None,
+        }
+        first = scanner.fetch_all_open_markets()
+        second = scanner.fetch_all_open_markets()
+        assert first == second
+        assert mock_api.get_public.call_count == 1
+
+    def test_cache_expires_after_ttl(self, mock_api):
+        scanner = MarketScanner(mock_api, cache_ttl=0.0)
+        mock_api.get_public.return_value = {
+            "markets": [_make_raw_market(ticker="M1")],
+            "cursor": None,
+        }
+        scanner.fetch_all_open_markets()
+        scanner.fetch_all_open_markets()
+        assert mock_api.get_public.call_count == 2
+
+    def test_invalidate_cache_forces_refetch(self, mock_api):
+        scanner = MarketScanner(mock_api, cache_ttl=60.0)
+        mock_api.get_public.return_value = {
+            "markets": [_make_raw_market(ticker="OLD")],
+            "cursor": None,
+        }
+        scanner.fetch_all_open_markets()
+        scanner.invalidate_cache()
+
+        mock_api.get_public.return_value = {
+            "markets": [_make_raw_market(ticker="NEW")],
+            "cursor": None,
+        }
+        result = scanner.fetch_all_open_markets()
+        assert result[0].ticker == "NEW"
+        assert mock_api.get_public.call_count == 2
+
+    def test_cache_default_ttl(self, mock_api):
+        scanner = MarketScanner(mock_api)
+        assert scanner.cache_ttl == 30.0
+        assert scanner._market_cache == []
+        assert scanner._cache_time == 0.0
+
+
+# ── 8. Orderbook depth validation ──
+
+class TestOrderbookValidation:
+    def test_sufficient_depth_returns_true(self, scanner, mock_api):
+        mock_api.get_public.return_value = {
+            "orderbook": {"yes": [[40, 5], [45, 3]], "no": []}
+        }
+        assert scanner.validate_orderbook_depth("MKT-A", "yes", 45, min_contracts=5) is True
+
+    def test_insufficient_depth_returns_false(self, scanner, mock_api):
+        mock_api.get_public.return_value = {
+            "orderbook": {"yes": [[40, 1]], "no": []}
+        }
+        assert scanner.validate_orderbook_depth("MKT-A", "yes", 45, min_contracts=5) is False
+
+    def test_empty_orderbook_fails_open(self, scanner, mock_api):
+        mock_api.get_public.return_value = {}
+        assert scanner.validate_orderbook_depth("MKT-A", "yes", 50, min_contracts=1) is True
+
+    def test_api_error_fails_open(self, scanner, mock_api):
+        mock_api.get_public.side_effect = Exception("timeout")
+        assert scanner.validate_orderbook_depth("MKT-A", "yes", 50, min_contracts=1) is True
+
+    def test_no_side_validation(self, scanner, mock_api):
+        mock_api.get_public.return_value = {
+            "orderbook": {"yes": [], "no": [[55, 10], [60, 5]]}
+        }
+        assert scanner.validate_orderbook_depth("MKT-A", "no", 60, min_contracts=10) is True
+
+    def test_only_counts_levels_at_or_below_price(self, scanner, mock_api):
+        mock_api.get_public.return_value = {
+            "orderbook": {"yes": [[30, 2], [40, 3], [50, 10]], "no": []}
+        }
+        # Only levels <= 40: [30,2] + [40,3] = 5
+        assert scanner.validate_orderbook_depth("MKT-A", "yes", 40, min_contracts=5) is True
+        assert scanner.validate_orderbook_depth("MKT-A", "yes", 40, min_contracts=6) is False
+
+    def test_empty_ticker_fails_open(self, scanner, mock_api):
+        assert scanner.validate_orderbook_depth("", "yes", 50, min_contracts=1) is True

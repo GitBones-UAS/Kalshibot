@@ -105,3 +105,53 @@ class TestFeeCalculation:
         opp = engine.scan_for_arbitrage(markets)[0]
         assert opp.fee_cents == 2
         assert opp.net_profit_cents == opp.gross_spread_cents - 2
+
+
+# ── 7. Realistic market data ──
+
+class TestRealMarketData:
+    def test_realistic_market_scan(self, engine):
+        """Scan across markets resembling real Kalshi data."""
+        markets = [
+            _make_market(ticker="PRES-24-DEM-NY", event_ticker="PRES-24",
+                         title="Democratic candidate wins New York?",
+                         yes=42, no=53, volume=1250),
+            _make_market(ticker="FED-RATE-25MAR", event_ticker="FED-RATE",
+                         title="Fed raises rates in March?",
+                         yes=67, no=33, volume=8400),
+            _make_market(ticker="WEATHER-NYC-80F", event_ticker="WEATHER-NYC",
+                         title="NYC reaches 80F on March 25?",
+                         yes=12, no=85, volume=320),
+            _make_market(ticker="BTC-100K", event_ticker="BTC-PRICE",
+                         title="Bitcoin exceeds 100K on March 25?",
+                         yes=55, no=45, volume=15600),
+            _make_market(ticker="NBA-LAL-WIN", event_ticker="NBA-LAL",
+                         title="Lakers win tonight?",
+                         yes=35, no=58, volume=2100),
+        ]
+        opps = engine.scan_for_arbitrage(markets, min_spread_cents=0)
+
+        # 3 arb markets: NBA (93), PRES (95), WEATHER (97)
+        # FED (100) and BTC (100) have no spread
+        assert len(opps) == 3
+
+        tickers = [o.market.ticker for o in opps]
+        assert tickers[0] == "NBA-LAL-WIN"       # ROI: 5/93 = 5.38%
+        assert tickers[1] == "PRES-24-DEM-NY"    # ROI: 3/95 = 3.16%
+        assert tickers[2] == "WEATHER-NYC-80F"    # ROI: 1/97 = 1.03%
+
+        best = opps[0]
+        assert best.total_cost_cents == 93
+        assert best.gross_spread_cents == 7
+        assert best.net_profit_cents == 5
+        assert best.roi_percent == round((5 / 93) * 100, 2)
+
+    def test_min_spread_filters_narrow_arbs(self, engine):
+        """With min_spread=3, total must be < 97 to pass."""
+        markets = [
+            _make_market(ticker="NARROW", yes=45, no=52),  # total=97, filtered
+            _make_market(ticker="WIDE", yes=44, no=51),    # total=95, passes
+        ]
+        opps = engine.scan_for_arbitrage(markets, min_spread_cents=3)
+        assert len(opps) == 1
+        assert opps[0].market.ticker == "WIDE"

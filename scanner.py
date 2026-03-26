@@ -17,8 +17,11 @@ class KalshiMarket:
 
 
 class MarketScanner:
-    def __init__(self, api: KalshiAPI):
+    def __init__(self, api: KalshiAPI, cache_ttl: float = 30.0):
         self.api = api
+        self.cache_ttl = cache_ttl
+        self._market_cache: list = []
+        self._cache_time: float = 0.0
 
     def _parse_market(self, m: dict) -> KalshiMarket:
         yes_price = m.get("yes_bid") or m.get("last_price") or 50
@@ -49,6 +52,10 @@ class MarketScanner:
             return [], None
 
     def fetch_all_open_markets(self):
+        now = time.monotonic()
+        if self._market_cache and (now - self._cache_time) < self.cache_ttl:
+            return self._market_cache
+
         all_markets = []
         cursor = None
         while True:
@@ -56,8 +63,14 @@ class MarketScanner:
             all_markets.extend(markets)
             if not cursor or not markets:
                 break
-            time.sleep(0.2)
+
+        self._market_cache = all_markets
+        self._cache_time = time.monotonic()
         return all_markets
+
+    def invalidate_cache(self):
+        self._market_cache = []
+        self._cache_time = 0.0
 
     def fetch_events(self, limit=200, status="open"):
         try:
@@ -81,3 +94,27 @@ class MarketScanner:
         except Exception as e:
             log_error(f"MarketScanner.fetch_orderbook({market_ticker}): {e}")
             return {}
+
+    def validate_orderbook_depth(self, market_ticker: str, side: str,
+                                  price_cents: int, min_contracts: int = 1) -> bool:
+        if not isinstance(market_ticker, str) or not market_ticker:
+            return True  # fail-open
+        try:
+            orderbook = self.fetch_orderbook(market_ticker)
+            if not isinstance(orderbook, dict) or not orderbook:
+                return True  # fail-open on bad data
+            key = "yes" if side == "yes" else "no"
+            levels = orderbook.get("orderbook", {}).get(key, [])
+            if not isinstance(levels, list):
+                return True
+            available = 0
+            for level in levels:
+                if not isinstance(level, (list, tuple)) or len(level) < 2:
+                    continue
+                level_price, level_qty = int(level[0]), int(level[1])
+                if level_price <= price_cents:
+                    available += level_qty
+            return available >= min_contracts
+        except Exception as e:
+            log_error(f"MarketScanner.validate_orderbook_depth({market_ticker}): {e}")
+            return True  # fail-open

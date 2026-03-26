@@ -154,6 +154,13 @@ def run_scan_cycle(scanner: MarketScanner, engine: ArbEngine, executor: TradeExe
         can, reason = risk.can_trade(size_usd)
 
         if can:
+            count = int(size_usd / (opp.total_cost_cents / 100.0)) if opp.total_cost_cents > 0 else 0
+            yes_deep = scanner.validate_orderbook_depth(m.ticker, "yes", opp.yes_price_cents, count)
+            no_deep = scanner.validate_orderbook_depth(m.ticker, "no", opp.no_price_cents, count)
+            if not yes_deep or not no_deep:
+                print(f"    Skipping {m.ticker}: insufficient orderbook depth")
+                continue
+
             try:
                 result = executor.execute_arb_trade(opp, size_usd)
                 status = result.get("status", "unknown")
