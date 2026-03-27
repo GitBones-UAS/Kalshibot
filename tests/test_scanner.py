@@ -1,11 +1,19 @@
 import time
+from datetime import datetime, timezone, timedelta
 import pytest
 from unittest.mock import MagicMock, patch
 from scanner import MarketScanner, KalshiMarket
 
 
+def _default_close_time():
+    """30 days from now — always within the 200-day test cutoff."""
+    return (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _make_raw_market(ticker="MKT-A", event_ticker="EVT-A", title="Will it rain?",
-                     yes_bid=65, volume=100, status="open", close_time="2026-12-31T00:00:00Z"):
+                     yes_bid=65, volume=100, status="open", close_time=None):
+    if close_time is None:
+        close_time = _default_close_time()
     return {
         "ticker": ticker,
         "event_ticker": event_ticker,
@@ -20,6 +28,15 @@ def _make_raw_market(ticker="MKT-A", event_ticker="EVT-A", title="Will it rain?"
 @pytest.fixture
 def mock_api():
     return MagicMock()
+
+
+@pytest.fixture(autouse=True)
+def _no_expiry_filter():
+    """Disable expiry filtering by default so existing tests aren't affected."""
+    with patch("scanner.config") as cfg, \
+         patch("scanner.signal_logger"):
+        cfg.MAX_DAYS_TO_EXPIRY = 200
+        yield cfg
 
 
 @pytest.fixture
@@ -104,7 +121,7 @@ class TestNoPriceComplement:
         """When yes_bid is missing, _parse_market falls back to last_price."""
         raw = {
             "ticker": "FB-1", "event_ticker": "EVT-1", "title": "Fallback test",
-            "last_price": 40, "volume": 10, "status": "open", "close_time": "2026-12-31T00:00:00Z",
+            "last_price": 40, "volume": 10, "status": "open", "close_time": _default_close_time(),
         }
         mock_api.get_public.return_value = {"markets": [raw], "cursor": None}
         markets, _ = scanner.fetch_open_markets()
@@ -116,7 +133,7 @@ class TestNoPriceComplement:
         """When both yes_bid and last_price are missing, defaults to 50."""
         raw = {
             "ticker": "DEF-1", "event_ticker": "EVT-1", "title": "Default test",
-            "volume": 0, "status": "open", "close_time": "2026-12-31T00:00:00Z",
+            "volume": 0, "status": "open", "close_time": _default_close_time(),
         }
         mock_api.get_public.return_value = {"markets": [raw], "cursor": None}
         markets, _ = scanner.fetch_open_markets()
@@ -328,3 +345,64 @@ class TestOrderbookValidation:
 
     def test_empty_ticker_fails_open(self, scanner, mock_api):
         assert scanner.validate_orderbook_depth("", "yes", 50, min_contracts=1) is True
+
+
+# ── 9. Expiry filter ──
+
+def _close_time_in(days):
+    """Generate a close_time N days from now."""
+    return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class TestExpiryFilter:
+    def test_filters_out_far_future_markets(self, mock_api, _no_expiry_filter):
+        _no_expiry_filter.MAX_DAYS_TO_EXPIRY = 10
+        scanner = MarketScanner(mock_api)
+        mock_api.get_public.return_value = {
+            "markets": [
+                _make_raw_market(ticker="SOON", close_time=_close_time_in(5)),
+                _make_raw_market(ticker="FAR", close_time=_close_time_in(365)),
+            ],
+            "cursor": None,
+        }
+        markets = scanner.fetch_all_open_markets()
+        tickers = [m.ticker for m in markets]
+        assert "SOON" in tickers
+        assert "FAR" not in tickers
+
+    def test_logs_too_far_out_to_signal_csv(self, mock_api, _no_expiry_filter):
+        _no_expiry_filter.MAX_DAYS_TO_EXPIRY = 10
+        scanner = MarketScanner(mock_api)
+        mock_api.get_public.return_value = {
+            "markets": [
+                _make_raw_market(ticker="FAR", close_time=_close_time_in(365)),
+            ],
+            "cursor": None,
+        }
+        with patch("scanner.signal_logger") as mock_logger:
+            scanner.fetch_all_open_markets()
+            mock_logger.log.assert_called_once()
+            call_kwargs = mock_logger.log.call_args
+            assert call_kwargs[1]["action"] == "TOO_FAR_OUT"
+            assert call_kwargs[1]["market_ticker"] == "FAR"
+
+    def test_empty_close_time_passes_filter(self, mock_api, _no_expiry_filter):
+        _no_expiry_filter.MAX_DAYS_TO_EXPIRY = 10
+        scanner = MarketScanner(mock_api)
+        mock_api.get_public.return_value = {
+            "markets": [_make_raw_market(ticker="NO-TIME", close_time="")],
+            "cursor": None,
+        }
+        markets = scanner.fetch_all_open_markets()
+        assert len(markets) == 1
+        assert markets[0].ticker == "NO-TIME"
+
+    def test_invalid_close_time_passes_filter(self, mock_api, _no_expiry_filter):
+        _no_expiry_filter.MAX_DAYS_TO_EXPIRY = 10
+        scanner = MarketScanner(mock_api)
+        mock_api.get_public.return_value = {
+            "markets": [_make_raw_market(ticker="BAD-TIME", close_time="not-a-date")],
+            "cursor": None,
+        }
+        markets = scanner.fetch_all_open_markets()
+        assert len(markets) == 1

@@ -13,11 +13,12 @@ class Config:
         self.TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
         self.DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() == "true"
-        self.SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
+        self.SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "120"))
         self.MIN_SPREAD: float = float(os.getenv("MIN_SPREAD_THRESHOLD", "0.03"))
         self.MAX_POSITION_SIZE: float = float(os.getenv("MAX_POSITION_SIZE_USD", "2.0"))
         self.MAX_DAILY_TRADES: int = int(os.getenv("MAX_DAILY_TRADES", "10"))
         self.MAX_DAILY_LOSS: float = float(os.getenv("MAX_DAILY_LOSS_USD", "10.0"))
+        self.MAX_DAYS_TO_EXPIRY: int = int(os.getenv("MAX_DAYS_TO_EXPIRY", "45"))
         self.IS_DEMO: bool = "demo" in self.KALSHI_BASE_URL.lower()
 
     def validate(self):

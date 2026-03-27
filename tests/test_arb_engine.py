@@ -1,12 +1,17 @@
+from datetime import datetime, timezone, timedelta
 import pytest
 from scanner import KalshiMarket
 from arb_engine import ArbEngine, FEE_PER_CONTRACT_CENTS
 
 
+def _future_close_time(days=30):
+    return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _make_market(ticker="MKT-A", yes=45, no=45, **kwargs):
     defaults = dict(
         event_ticker="EVT-A", title="Test market",
-        volume=100, status="open", close_time="2026-12-31T00:00:00Z",
+        volume=100, status="open", close_time=_future_close_time(),
     )
     defaults.update(kwargs)
     return KalshiMarket(

@@ -1,7 +1,9 @@
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+from config import config
 from kalshi_client import KalshiAPI
-from logger import log_error
+from logger import signal_logger, log_error
 
 
 @dataclass
@@ -22,6 +24,16 @@ class MarketScanner:
         self.cache_ttl = cache_ttl
         self._market_cache: list = []
         self._cache_time: float = 0.0
+
+    def _is_within_expiry(self, market: KalshiMarket) -> bool:
+        if not market.close_time:
+            return True
+        try:
+            close_dt = datetime.fromisoformat(market.close_time.replace("Z", "+00:00"))
+            cutoff = datetime.now(timezone.utc) + timedelta(days=config.MAX_DAYS_TO_EXPIRY)
+            return close_dt <= cutoff
+        except (ValueError, TypeError):
+            return True
 
     def _parse_market(self, m: dict) -> KalshiMarket:
         yes_price = m.get("yes_bid") or m.get("last_price") or 50
@@ -60,7 +72,21 @@ class MarketScanner:
         cursor = None
         while True:
             markets, cursor = self.fetch_open_markets(cursor=cursor)
-            all_markets.extend(markets)
+            for m in markets:
+                if self._is_within_expiry(m):
+                    all_markets.append(m)
+                else:
+                    signal_logger.log(
+                        event_ticker=m.event_ticker,
+                        market_ticker=m.ticker,
+                        title=m.title,
+                        yes_price_cents=m.yes_price_cents,
+                        no_price_cents=m.no_price_cents,
+                        total_cost_cents=m.yes_price_cents + m.no_price_cents,
+                        spread_cents=0,
+                        estimated_profit_cents=0,
+                        action="TOO_FAR_OUT",
+                    )
             if not cursor or not markets:
                 break
 

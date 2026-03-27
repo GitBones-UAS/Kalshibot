@@ -13,9 +13,12 @@ from multi_arb import MultiArbScanner
 from executor import TradeExecutor
 from risk_manager import RiskManager
 from alerts import AlertManager
+from pnl_tracker import PnLTracker
 from logger import signal_logger, multi_arb_logger, log_error
 
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
+DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
+VALIDATE_DURATION = 30 * 60  # 30 minutes
 
 
 def print_banner():
@@ -84,7 +87,7 @@ class TelegramPoller:
 
 def handle_telegram_commands(poller: TelegramPoller, risk: RiskManager,
                              api: KalshiAPI, executor: TradeExecutor,
-                             alerts: AlertManager):
+                             alerts: AlertManager, pnl: PnLTracker = None):
     commands = poller.poll_commands()
     for cmd in commands:
         if cmd == "/kill":
@@ -109,27 +112,45 @@ def handle_telegram_commands(poller: TelegramPoller, risk: RiskManager,
             risk.deactivate_kill_switch()
             alerts.send_alert("Kill switch deactivated. Bot resumed.")
             print("  Telegram command: /resume")
+        elif cmd == "/profitloss" and pnl:
+            alerts.send_alert(pnl.format_total_pnl())
+            print("  Telegram command: /profitloss")
+        elif cmd == "/weekprofitloss" and pnl:
+            alerts.send_alert(pnl.format_weekly_pnl())
+            print("  Telegram command: /weekprofitloss")
+        elif cmd == "/openpositions" and pnl:
+            alerts.send_alert(pnl.format_open_positions(api))
+            print("  Telegram command: /openpositions")
 
 
 def run_scan_cycle(scanner: MarketScanner, engine: ArbEngine, executor: TradeExecutor,
-                   risk: RiskManager, alerts: AlertManager, api: KalshiAPI):
+                   risk: RiskManager, alerts: AlertManager, api: KalshiAPI) -> dict:
+    """Run a binary arb scan cycle. Returns stats dict."""
+    stats = {"markets_scanned": 0, "opps_found": 0, "spreads": [], "errors": 0}
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     print(f"\n[{now}] Scanning markets...")
+
+    # Reconcile any pending SL/TP OCO pairs from previous cycles
+    executor.reconcile_sl_tp_orders()
 
     risk.check_balance(api)
     if risk.kill_switch:
         print(f"  Kill switch active: {risk.kill_reason}")
-        return
+        return stats
 
     markets = scanner.fetch_all_open_markets()
+    stats["markets_scanned"] = len(markets)
     print(f"  Fetched {len(markets)} open markets")
 
     if not markets:
         print("  No markets found, skipping.")
-        return
+        return stats
 
     min_spread_cents = int(config.MIN_SPREAD * 100)
     opportunities = engine.scan_for_arbitrage(markets, min_spread_cents=min_spread_cents)
+    stats["opps_found"] = len(opportunities)
+    stats["spreads"] = [opp.gross_spread_cents for opp in opportunities]
 
     for opp in opportunities:
         m = opp.market
@@ -149,6 +170,7 @@ def run_scan_cycle(scanner: MarketScanner, engine: ArbEngine, executor: TradeExe
             alerts.send_opportunity_alert(opp)
         except Exception as e:
             log_error(f"Alert failed for {m.ticker}: {e}")
+            stats["errors"] += 1
 
         size_usd = config.MAX_POSITION_SIZE
         can, reason = risk.can_trade(size_usd)
@@ -169,9 +191,11 @@ def run_scan_cycle(scanner: MarketScanner, engine: ArbEngine, executor: TradeExe
                     risk.record_trade(m.ticker, size_usd)
                 elif status == "error":
                     risk.record_failure()
+                    stats["errors"] += 1
                 print(f"    Trade {status}: {m.ticker} x{result.get('count', 0)}")
             except Exception as e:
                 risk.record_failure()
+                stats["errors"] += 1
                 log_error(f"Trade execution failed for {m.ticker}: {e}")
                 alerts.send_error_alert(f"Trade execution failed: {m.ticker} - {e}")
         else:
@@ -186,20 +210,42 @@ def run_scan_cycle(scanner: MarketScanner, engine: ArbEngine, executor: TradeExe
     else:
         print("  No binary arb opportunities found.")
 
+    return stats
 
-def run_multi_arb_cycle(multi_scanner: MultiArbScanner):
+
+def run_multi_arb_cycle(multi_scanner: MultiArbScanner) -> dict:
+    """Run a multi-outcome arb scan cycle. Returns stats dict."""
+    stats = {"events_scanned": 0, "opps_found": 0, "spreads": [], "errors": 0}
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     print(f"\n[{now}] Scanning multi-outcome events...")
 
     min_spread_cents = int(config.MIN_SPREAD * 100)
-    events = multi_scanner.fetch_multi_outcome_events()
+    try:
+        events = multi_scanner.fetch_multi_outcome_events()
+    except Exception as e:
+        log_error(f"multi_arb fetch error: {e}")
+        stats["errors"] += 1
+        print(f"  Error fetching events: {e}")
+        return stats
+
+    stats["events_scanned"] = len(events)
     print(f"  Found {len(events)} events with 3+ outcomes")
 
     if not events:
         print("  No multi-outcome events found, skipping.")
-        return
+        return stats
 
-    opportunities = multi_scanner.scan_for_multi_arb(events, min_spread_cents=min_spread_cents)
+    try:
+        opportunities = multi_scanner.scan_for_multi_arb(events, min_spread_cents=min_spread_cents)
+    except Exception as e:
+        log_error(f"multi_arb scan error: {e}")
+        stats["errors"] += 1
+        print(f"  Error scanning events: {e}")
+        return stats
+
+    stats["opps_found"] = len(opportunities)
+    stats["spreads"] = [opp.gross_spread_cents for opp in opportunities]
 
     for opp in opportunities:
         markets_str = "; ".join(
@@ -225,14 +271,131 @@ def run_multi_arb_cycle(multi_scanner: MultiArbScanner):
     else:
         print("  No multi-arb opportunities found.")
 
+    return stats
+
+
+def run_validate(scanner, engine, multi_scanner, executor, risk, alerts, api):
+    """Run validation mode: 30 min dry run with stats collection."""
+    config.DRY_RUN = True
+    executor.dry_run = True
+
+    print(f"\n{'=' * 45}")
+    print("  VALIDATION MODE")
+    print(f"  Duration: {VALIDATE_DURATION // 60} minutes")
+    print(f"  DRY_RUN forced ON")
+    print(f"{'=' * 45}\n")
+
+    cycles = 0
+    total_binary_stats = {"markets_scanned": 0, "opps_found": 0, "spreads": [], "errors": 0}
+    total_multi_stats = {"events_scanned": 0, "opps_found": 0, "spreads": [], "errors": 0}
+    start = time.monotonic()
+
+    try:
+        while time.monotonic() - start < VALIDATE_DURATION:
+            cycles += 1
+            print(f"\n--- Validation cycle {cycles} ---")
+
+            try:
+                binary_stats = run_scan_cycle(scanner, engine, executor, risk, alerts, api)
+                total_binary_stats["markets_scanned"] += binary_stats["markets_scanned"]
+                total_binary_stats["opps_found"] += binary_stats["opps_found"]
+                total_binary_stats["spreads"].extend(binary_stats["spreads"])
+                total_binary_stats["errors"] += binary_stats["errors"]
+            except Exception as e:
+                total_binary_stats["errors"] += 1
+                log_error(f"validate binary scan: {e}")
+                print(f"  Binary scan error: {e}")
+
+            try:
+                multi_stats = run_multi_arb_cycle(multi_scanner)
+                total_multi_stats["events_scanned"] += multi_stats["events_scanned"]
+                total_multi_stats["opps_found"] += multi_stats["opps_found"]
+                total_multi_stats["spreads"].extend(multi_stats["spreads"])
+                total_multi_stats["errors"] += multi_stats["errors"]
+            except Exception as e:
+                total_multi_stats["errors"] += 1
+                log_error(f"validate multi scan: {e}")
+                print(f"  Multi scan error: {e}")
+
+            remaining = VALIDATE_DURATION - (time.monotonic() - start)
+            if remaining > 0:
+                wait = min(config.SCAN_INTERVAL, remaining)
+                time.sleep(wait)
+
+    except KeyboardInterrupt:
+        print("\nValidation interrupted early.")
+
+    elapsed = time.monotonic() - start
+    report = _build_validation_report(cycles, elapsed, total_binary_stats, total_multi_stats)
+
+    print(f"\n{report}")
+
+    report_path = os.path.join(LOGS_DIR, "validation_report.txt")
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    with open(report_path, "w") as f:
+        f.write(report)
+    print(f"\nReport saved to {report_path}")
+
+
+def _build_validation_report(cycles, elapsed, binary, multi) -> str:
+    def avg_spread(spreads):
+        return round(sum(spreads) / len(spreads), 1) if spreads else 0.0
+
+    def max_spread(spreads):
+        return max(spreads) if spreads else 0
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    total_errors = binary["errors"] + multi["errors"]
+
+    lines = [
+        "=" * 50,
+        "  VALIDATION REPORT",
+        f"  Generated: {ts}",
+        "=" * 50,
+        "",
+        "OVERVIEW",
+        f"  Duration:           {elapsed / 60:.1f} minutes",
+        f"  Cycles completed:   {cycles}",
+        f"  Total errors:       {total_errors}",
+        "",
+        "BINARY ARBITRAGE",
+        f"  Markets scanned:    {binary['markets_scanned']}",
+        f"  Avg markets/cycle:  {binary['markets_scanned'] / cycles:.0f}" if cycles else "  Avg markets/cycle:  0",
+        f"  Opps found:         {binary['opps_found']}",
+        f"  Avg spread:         {avg_spread(binary['spreads'])}c",
+        f"  Max spread:         {max_spread(binary['spreads'])}c",
+        f"  Errors:             {binary['errors']}",
+        "",
+        "MULTI-OUTCOME ARBITRAGE",
+        f"  Events scanned:     {multi['events_scanned']}",
+        f"  Avg events/cycle:   {multi['events_scanned'] / cycles:.0f}" if cycles else "  Avg events/cycle:   0",
+        f"  Opps found:         {multi['opps_found']}",
+        f"  Avg spread:         {avg_spread(multi['spreads'])}c",
+        f"  Max spread:         {max_spread(multi['spreads'])}c",
+        f"  Errors:             {multi['errors']}",
+        "",
+        "=" * 50,
+    ]
+    return "\n".join(lines)
+
 
 async def main():
     parser = argparse.ArgumentParser(description="kalshi_bot - Kalshi arbitrage scanner")
     parser.add_argument("--scan-once", action="store_true",
-                        help="Run a single scan and exit")
+                        help="Run a single scan cycle and exit")
+    parser.add_argument("--validate", action="store_true",
+                        help="Run 30-min dry run, print report, and exit")
+    parser.add_argument("--demo", action="store_true",
+                        help="Force Kalshi demo API regardless of .env")
     args = parser.parse_args()
 
     os.makedirs(LOGS_DIR, exist_ok=True)
+
+    # --demo: override base URL before anything uses it
+    if args.demo:
+        config.KALSHI_BASE_URL = DEMO_BASE_URL
+        config.IS_DEMO = True
+        print(f"[--demo] Forcing demo API: {DEMO_BASE_URL}")
 
     try:
         config.validate()
@@ -248,17 +411,24 @@ async def main():
     scanner = MarketScanner(api)
     engine = ArbEngine()
     multi_scanner = MultiArbScanner(api)
-    executor = TradeExecutor(api=api, dry_run=config.DRY_RUN)
+    pnl = PnLTracker()
+    executor = TradeExecutor(api=api, dry_run=config.DRY_RUN, pnl_tracker=pnl)
     risk = RiskManager()
     alerts = AlertManager()
     poller = TelegramPoller(config.TELEGRAM_TOKEN, config.TELEGRAM_CHAT_ID)
 
     print_banner()
 
+    # --validate: 30-min dry run with report
+    if args.validate:
+        run_validate(scanner, engine, multi_scanner, executor, risk, alerts, api)
+        return
+
     mode = "DRY_RUN" if config.DRY_RUN else "LIVE"
     env = "DEMO" if config.IS_DEMO else "PRODUCTION"
     alerts.send_alert(f"Bot started. Mode: {mode}. Environment: {env}")
 
+    # --scan-once: single cycle and exit
     if args.scan_once:
         run_scan_cycle(scanner, engine, executor, risk, alerts, api)
         run_multi_arb_cycle(multi_scanner)
@@ -269,13 +439,21 @@ async def main():
     print("Press Ctrl+C to stop.\n")
 
     last_summary = time.monotonic()
+    last_expiry_check = time.monotonic()
+    EXPIRY_CHECK_INTERVAL = 8 * 3600  # 8 hours
 
     try:
         while True:
             try:
-                handle_telegram_commands(poller, risk, api, executor, alerts)
+                handle_telegram_commands(poller, risk, api, executor, alerts, pnl)
                 run_scan_cycle(scanner, engine, executor, risk, alerts, api)
                 run_multi_arb_cycle(multi_scanner)
+
+                # Check for positions nearing market resolution (every 8 hours)
+                if time.monotonic() - last_expiry_check >= EXPIRY_CHECK_INTERVAL:
+                    executor.check_expiring_positions()
+                    last_expiry_check = time.monotonic()
+
             except KeyboardInterrupt:
                 raise
             except Exception as e:

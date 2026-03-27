@@ -1,8 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from config import config
 from kalshi_client import KalshiAPI
-from logger import log_error
+from logger import signal_logger, log_error
 
 FEE_PER_CONTRACT_CENTS = 2
 
@@ -68,11 +69,38 @@ class MultiArbScanner:
                     event_markets = detail.get("markets", [])
                     open_markets = [m for m in event_markets if m.get("status") == "open"]
 
-                    if len(open_markets) >= 3:
+                    cutoff = datetime.now(timezone.utc) + timedelta(days=config.MAX_DAYS_TO_EXPIRY)
+                    filtered = []
+                    for m in open_markets:
+                        close_time = m.get("close_time", "")
+                        if not close_time:
+                            filtered.append(m)
+                            continue
+                        try:
+                            close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                            if close_dt <= cutoff:
+                                filtered.append(m)
+                            else:
+                                yes_price = m.get("yes_bid") or m.get("last_price") or 50
+                                signal_logger.log(
+                                    event_ticker=ticker,
+                                    market_ticker=m.get("ticker", ""),
+                                    title=m.get("title", ""),
+                                    yes_price_cents=int(yes_price),
+                                    no_price_cents=100 - int(yes_price),
+                                    total_cost_cents=100,
+                                    spread_cents=0,
+                                    estimated_profit_cents=0,
+                                    action="TOO_FAR_OUT",
+                                )
+                        except (ValueError, TypeError):
+                            filtered.append(m)
+
+                    if len(filtered) >= 3:
                         events.append({
                             "event_ticker": ticker,
                             "title": title,
-                            "markets": open_markets,
+                            "markets": filtered,
                         })
 
             if max_events and len(events) >= max_events:
