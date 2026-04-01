@@ -1,10 +1,12 @@
 import argparse
 import asyncio
+import csv
 import os
 import time
 from datetime import datetime, timezone
 
 import requests
+from aiohttp import web
 from config import config
 from kalshi_client import KalshiAPI
 from scanner import MarketScanner
@@ -14,10 +16,11 @@ from executor import TradeExecutor
 from risk_manager import RiskManager
 from alerts import AlertManager
 from pnl_tracker import PnLTracker
-from logger import signal_logger, multi_arb_logger, log_error
+from logger import signal_logger, multi_arb_logger, log_error, TRADE_CSV, SIGNAL_CSV
 
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
 DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
+PROD_BASE_URL = "https://api.kalshi.co/trade-api/v2"
 VALIDATE_DURATION = 30 * 60  # 30 minutes
 
 
@@ -379,6 +382,232 @@ def _build_validation_report(cycles, elapsed, binary, multi) -> str:
     return "\n".join(lines)
 
 
+# ── Dashboard server ──────────────────────────────────────────────────
+
+
+class DashboardState:
+    def __init__(self):
+        self.start_time = time.monotonic()
+        self.last_scan_time = None
+        self.scan_count = 0
+        self.opps_found_today = 0
+        self._last_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def record_scan(self, opps_found):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today != self._last_reset_date:
+            self.opps_found_today = 0
+            self._last_reset_date = today
+        self.last_scan_time = datetime.now(timezone.utc).isoformat()
+        self.scan_count += 1
+        self.opps_found_today += opps_found
+
+
+class _Ctx:
+    """Shared refs for dashboard route handlers."""
+    state = None
+    risk = None
+    api = None
+    pnl = None
+    executor = None
+    alerts = None
+
+
+_ctx = _Ctx()
+
+
+def _format_uptime(seconds):
+    s = int(seconds)
+    days, s = divmod(s, 86400)
+    hours, s = divmod(s, 3600)
+    minutes, s = divmod(s, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{s}s")
+    return " ".join(parts)
+
+
+def _read_csv_tail(path, n=50):
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        return list(reversed(rows[-n:]))
+    except Exception:
+        return []
+
+
+async def _handle_dashboard(request):
+    fpath = os.path.join(os.path.dirname(__file__), "dashboard.html")
+    try:
+        with open(fpath, "r") as f:
+            html = f.read()
+        return web.Response(text=html, content_type="text/html")
+    except FileNotFoundError:
+        return web.Response(text="dashboard.html not found", status=404)
+
+
+async def _handle_status(request):
+    uptime = time.monotonic() - _ctx.state.start_time if _ctx.state else 0
+    return web.json_response({
+        "status": "running",
+        "uptime_seconds": round(uptime),
+        "uptime_human": _format_uptime(uptime),
+        "last_scan_time": _ctx.state.last_scan_time if _ctx.state else None,
+        "scan_count": _ctx.state.scan_count if _ctx.state else 0,
+        "opps_found_today": _ctx.state.opps_found_today if _ctx.state else 0,
+        "dry_run": config.DRY_RUN,
+        "kill_switch_active": _ctx.risk.kill_switch if _ctx.risk else False,
+        "environment": "demo" if config.IS_DEMO else "production",
+        "scan_interval": config.SCAN_INTERVAL,
+    })
+
+
+async def _handle_balance(request):
+    if config.DRY_RUN or not _ctx.api:
+        exposure = _ctx.risk.total_exposure if _ctx.risk else 0.0
+        return web.json_response({
+            "balance_usd": 0.0,
+            "total_exposure_usd": round(exposure, 2),
+            "available_usd": 0.0,
+        })
+    try:
+        balance = _ctx.api.get_balance()
+        exposure = _ctx.risk.total_exposure if _ctx.risk else 0.0
+        return web.json_response({
+            "balance_usd": round(balance, 2),
+            "total_exposure_usd": round(exposure, 2),
+            "available_usd": round(balance - exposure, 2),
+        })
+    except Exception:
+        return web.json_response({
+            "balance_usd": 0.0,
+            "total_exposure_usd": 0.0,
+            "available_usd": 0.0,
+        })
+
+
+async def _handle_positions(request):
+    if not _ctx.api:
+        return web.json_response({"positions": []})
+    try:
+        positions = _ctx.api.get_positions()
+        result = []
+        for p in positions:
+            qty = int(p.get("position", 0))
+            if qty == 0:
+                continue
+            result.append({
+                "ticker": p.get("ticker", ""),
+                "title": p.get("market_title", p.get("title", "")),
+                "side": "yes" if qty > 0 else "no",
+                "count": abs(qty),
+                "avg_price_cents": int(p.get("average_price", 0)),
+                "current_price_cents": int(p.get("last_price", 0)),
+                "pnl_cents": int(p.get("realized_pnl", 0)),
+            })
+        return web.json_response({"positions": result})
+    except Exception:
+        return web.json_response({"positions": []})
+
+
+async def _handle_trades(request):
+    return web.json_response({"trades": _read_csv_tail(TRADE_CSV, 50)})
+
+
+async def _handle_signals(request):
+    return web.json_response({"signals": _read_csv_tail(SIGNAL_CSV, 50)})
+
+
+async def _handle_daily_stats(request):
+    status = _ctx.risk.get_status() if _ctx.risk else {}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_trades = []
+    if _ctx.pnl:
+        for t in _ctx.pnl._trades:
+            if t.get("timestamp", "").startswith(today):
+                today_trades.append(t)
+
+    wins = sum(1 for t in today_trades if t.get("pnl_cents", 0) > 0)
+    losses = sum(1 for t in today_trades if t.get("pnl_cents", 0) < 0)
+    pnls = [t.get("pnl_cents", 0) for t in today_trades]
+    total = wins + losses
+
+    return web.json_response({
+        "daily_trades": status.get("daily_trade_count", 0),
+        "daily_pnl_cents": int(status.get("daily_pnl", 0) * 100),
+        "daily_opps_found": _ctx.state.opps_found_today if _ctx.state else 0,
+        "win_count": wins,
+        "loss_count": losses,
+        "win_rate_percent": round(wins / total * 100, 1) if total > 0 else 0.0,
+        "best_trade_cents": max(pnls) if pnls else 0,
+        "worst_trade_cents": min(pnls) if pnls else 0,
+    })
+
+
+async def _handle_kill(request):
+    if _ctx.risk:
+        _ctx.risk.activate_kill_switch("dashboard")
+        if _ctx.api and _ctx.executor and _ctx.alerts:
+            cancel_all_orders(_ctx.api, _ctx.executor, _ctx.alerts)
+    return web.json_response({"success": True, "message": "Kill switch activated via dashboard"})
+
+
+async def _handle_resume(request):
+    if _ctx.risk:
+        _ctx.risk.deactivate_kill_switch()
+    return web.json_response({"success": True, "message": "Kill switch deactivated"})
+
+
+async def _handle_switch_env(request):
+    if not _ctx.risk or not _ctx.risk.kill_switch:
+        return web.json_response(
+            {"success": False, "message": "Kill switch must be active to switch environments"},
+            status=400,
+        )
+    if config.IS_DEMO:
+        config.KALSHI_BASE_URL = PROD_BASE_URL
+        config.IS_DEMO = False
+        if _ctx.api:
+            _ctx.api.base_url = PROD_BASE_URL
+        env = "production"
+    else:
+        config.KALSHI_BASE_URL = DEMO_BASE_URL
+        config.IS_DEMO = True
+        if _ctx.api:
+            _ctx.api.base_url = DEMO_BASE_URL
+        env = "demo"
+    return web.json_response({"success": True, "environment": env})
+
+
+async def _start_dashboard_server():
+    app = web.Application()
+    app.router.add_get("/dashboard", _handle_dashboard)
+    app.router.add_get("/api/status", _handle_status)
+    app.router.add_get("/api/balance", _handle_balance)
+    app.router.add_get("/api/positions", _handle_positions)
+    app.router.add_get("/api/trades", _handle_trades)
+    app.router.add_get("/api/signals", _handle_signals)
+    app.router.add_get("/api/daily-stats", _handle_daily_stats)
+    app.router.add_post("/api/kill", _handle_kill)
+    app.router.add_post("/api/resume", _handle_resume)
+    app.router.add_post("/api/switch-env", _handle_switch_env)
+
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 8080)
+    await site.start()
+    print("  Dashboard:     http://127.0.0.1:8080/dashboard")
+    return runner
+
+
 async def main():
     parser = argparse.ArgumentParser(description="kalshi_bot - Kalshi arbitrage scanner")
     parser.add_argument("--scan-once", action="store_true",
@@ -435,6 +664,15 @@ async def main():
         print("\nSingle scan complete.")
         return
 
+    # Start dashboard server
+    _ctx.state = DashboardState()
+    _ctx.risk = risk
+    _ctx.api = api
+    _ctx.pnl = pnl
+    _ctx.executor = executor
+    _ctx.alerts = alerts
+    dash_runner = await _start_dashboard_server()
+
     print(f"Starting continuous scan (every {config.SCAN_INTERVAL}s)...")
     print("Press Ctrl+C to stop.\n")
 
@@ -446,8 +684,12 @@ async def main():
         while True:
             try:
                 handle_telegram_commands(poller, risk, api, executor, alerts, pnl)
-                run_scan_cycle(scanner, engine, executor, risk, alerts, api)
-                run_multi_arb_cycle(multi_scanner)
+                b_stats = run_scan_cycle(scanner, engine, executor, risk, alerts, api)
+                m_stats = run_multi_arb_cycle(multi_scanner)
+
+                if _ctx.state:
+                    _ctx.state.record_scan(
+                        b_stats.get("opps_found", 0) + m_stats.get("opps_found", 0))
 
                 # Check for positions nearing market resolution (every 8 hours)
                 if time.monotonic() - last_expiry_check >= EXPIRY_CHECK_INTERVAL:
@@ -468,6 +710,7 @@ async def main():
             await asyncio.sleep(config.SCAN_INTERVAL)
     except KeyboardInterrupt:
         print("\n\nShutting down gracefully...")
+        await dash_runner.cleanup()
         alerts.send_alert("Bot stopped.")
 
 

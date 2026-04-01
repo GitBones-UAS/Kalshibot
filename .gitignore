@@ -1,6 +1,8 @@
 .env
+test.env
 __pycache__/
 logs/
 *.pyc
 venv/
 *.pem
+demo.key.txt

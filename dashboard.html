@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>kalshi_bot Dashboard</title>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a1a;
+            color: #e2e8f0;
+            min-height: 100vh;
+        }
+
+        .container { max-width: 1280px; margin: 0 auto; padding: 12px; }
+
+        /* Connection banner */
+        .conn-banner {
+            display: none;
+            background: #991b1b;
+            color: #fecaca;
+            text-align: center;
+            padding: 10px;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            animation: banner-pulse 2s ease-in-out infinite;
+        }
+        @keyframes banner-pulse { 0%,100%{ opacity:1; } 50%{ opacity:.7; } }
+
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 0;
+            border-bottom: 1px solid #1e293b;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .header-left { display: flex; align-items: center; gap: 12px; }
+        .header-left h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; }
+        .header-right {
+            display: flex; align-items: center; gap: 16px;
+            font-size: 0.82rem; color: #94a3b8;
+        }
+
+        .badge {
+            display: inline-block; padding: 3px 10px; border-radius: 12px;
+            font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+        }
+        .badge-demo { background: #064e3b; color: #6ee7b7; }
+        .badge-prod { background: #7f1d1d; color: #fca5a5; }
+
+        .status-dot {
+            display: inline-block; width: 8px; height: 8px;
+            border-radius: 50%; margin-right: 5px; vertical-align: middle;
+        }
+        .status-dot.active { background: #22c55e; animation: dot-pulse 2s ease-in-out infinite; }
+        .status-dot.stopped { background: #ef4444; }
+        @keyframes dot-pulse { 0%,100%{ opacity:1; box-shadow:0 0 0 0 rgba(34,197,94,.4); } 50%{ opacity:.5; box-shadow:0 0 0 6px rgba(34,197,94,0); } }
+
+        /* Controls */
+        .controls {
+            display: flex; align-items: center; gap: 10px;
+            margin-bottom: 16px; flex-wrap: wrap;
+        }
+        .btn {
+            padding: 8px 22px; border: none; border-radius: 6px;
+            font-size: 0.82rem; font-weight: 600; cursor: pointer;
+            transition: opacity .15s, transform .1s;
+        }
+        .btn:hover { opacity: .85; }
+        .btn:active { transform: scale(.97); }
+        .btn:disabled { opacity: .35; cursor: not-allowed; transform: none; }
+        .btn-danger { background: #dc2626; color: #fff; }
+        .btn-success { background: #16a34a; color: #fff; }
+        .btn-secondary { background: #334155; color: #e2e8f0; }
+
+        .indicator {
+            padding: 5px 12px; border-radius: 4px;
+            font-size: 0.78rem; font-weight: 600;
+        }
+        .indicator-on { background: #422006; color: #fbbf24; }
+        .indicator-off { background: #064e3b; color: #6ee7b7; }
+
+        /* Stats grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+            gap: 10px; margin-bottom: 16px;
+        }
+        .stat-card {
+            background: #111827; border: 1px solid #1e293b;
+            border-radius: 8px; padding: 14px 16px;
+        }
+        .stat-label {
+            font-size: 0.7rem; color: #94a3b8; text-transform: uppercase;
+            letter-spacing: 0.06em; margin-bottom: 4px;
+        }
+        .stat-value {
+            font-size: 1.4rem; font-weight: 700;
+            font-family: 'Cascadia Code','SF Mono','Fira Code','Consolas',monospace;
+        }
+        .stat-sub { font-size: 0.72rem; color: #64748b; margin-top: 3px; }
+
+        /* Tables */
+        .table-section {
+            background: #111827; border: 1px solid #1e293b;
+            border-radius: 8px; margin-bottom: 16px; overflow: hidden;
+        }
+        .table-section h2 {
+            font-size: 0.82rem; padding: 10px 16px;
+            border-bottom: 1px solid #1e293b; color: #94a3b8;
+            text-transform: uppercase; letter-spacing: 0.06em;
+        }
+        .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+        th {
+            text-align: left; padding: 8px 12px; color: #64748b;
+            font-weight: 600; border-bottom: 1px solid #1e293b; white-space: nowrap;
+        }
+        td {
+            padding: 7px 12px; border-bottom: 1px solid #0f172a;
+            white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+        }
+        tr:hover td { background: rgba(30,41,59,.25); }
+        .empty-row td {
+            text-align: center; color: #475569; padding: 28px;
+            font-style: italic; white-space: normal;
+        }
+
+        /* Utility */
+        .mono { font-family: 'Cascadia Code','SF Mono','Fira Code','Consolas',monospace; }
+        .pnl-pos { color: #22c55e; }
+        .pnl-neg { color: #ef4444; }
+        .pnl-zero { color: #64748b; }
+        .text-muted { color: #64748b; }
+        .text-warn { color: #f59e0b; }
+
+        /* Mobile */
+        @media (max-width: 640px) {
+            header { flex-direction: column; align-items: flex-start; }
+            .header-right { flex-direction: column; align-items: flex-start; gap: 4px; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .stat-value { font-size: 1.15rem; }
+            .controls { gap: 8px; }
+            .btn { padding: 10px 18px; font-size: 0.85rem; }
+            td { font-size: 0.72rem; padding: 6px 8px; }
+        }
+        @media (max-width: 380px) {
+            .stats-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div id="conn-banner" class="conn-banner">Connection lost &mdash; retrying&hellip;</div>
+
+    <div class="container">
+        <header>
+            <div class="header-left">
+                <h1>kalshi_bot</h1>
+                <span id="env-badge" class="badge badge-demo">DEMO</span>
+            </div>
+            <div class="header-right">
+                <span>
+                    <span class="status-dot active" id="status-dot"></span>
+                    <span id="status-text">Connecting&hellip;</span>
+                </span>
+                <span>Uptime: <span id="uptime" class="mono">--</span></span>
+                <span>Last scan: <span id="last-scan" class="mono">--</span></span>
+                <span>Scans: <span id="scan-count" class="mono">0</span></span>
+            </div>
+        </header>
+
+        <div class="controls">
+            <button id="toggle-btn" class="btn btn-danger" onclick="toggleBot()">STOP</button>
+            <button id="env-btn" class="btn btn-secondary" onclick="switchEnv()" disabled>Switch Environment</button>
+            <span id="dry-run-ind" class="indicator indicator-on">DRY RUN: ON</span>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Balance</div>
+                <div class="stat-value mono" id="balance">--</div>
+                <div class="stat-sub" id="balance-sub">Exposure: -- | Avail: --</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Daily P&amp;L</div>
+                <div class="stat-value mono" id="daily-pnl">$0.00</div>
+                <div class="stat-sub" id="daily-pnl-sub">Best: -- / Worst: --</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Trades Today</div>
+                <div class="stat-value mono" id="trades-today">0</div>
+                <div class="stat-sub" id="trades-sub">W: 0 / L: 0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Opportunities</div>
+                <div class="stat-value mono" id="opps-today">0</div>
+                <div class="stat-sub">Found today</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value mono" id="win-rate">--</div>
+                <div class="stat-sub" id="win-rate-sub">No trades</div>
+            </div>
+        </div>
+
+        <div class="table-section">
+            <h2>Open Positions</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Ticker</th><th>Title</th><th>Side</th>
+                            <th>Qty</th><th>Avg Price</th><th>Current</th><th>P&amp;L</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-body">
+                        <tr class="empty-row"><td colspan="7">No open positions</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="table-section">
+            <h2>Recent Trades</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th><th>Ticker</th><th>Side</th><th>Price</th>
+                            <th>Count</th><th>Status</th><th>Fees</th><th>Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody id="trades-body">
+                        <tr class="empty-row"><td colspan="8">No trades recorded</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="table-section">
+            <h2>Recent Signals</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th><th>Ticker</th><th>Title</th>
+                            <th>YES</th><th>NO</th><th>Spread</th><th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="signals-body">
+                        <tr class="empty-row"><td colspan="7">No signals detected</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        'use strict';
+
+        var botRunning = true;
+        var killActive = false;
+
+        function esc(s) {
+            if (!s) return '';
+            var d = document.createElement('div');
+            d.appendChild(document.createTextNode(s));
+            return d.innerHTML;
+        }
+
+        function pnlClass(c) {
+            c = Number(c) || 0;
+            return c > 0 ? 'pnl-pos' : c < 0 ? 'pnl-neg' : 'pnl-zero';
+        }
+
+        function fmtCents(c) {
+            c = Number(c) || 0;
+            var usd = (c / 100).toFixed(2);
+            return (c >= 0 ? '+$' : '-$') + Math.abs(usd);
+        }
+
+        function fmtUsd(v) {
+            v = Number(v) || 0;
+            return '$' + v.toFixed(2);
+        }
+
+        function fmtTime(iso) {
+            if (!iso) return '--';
+            try {
+                var d = new Date(iso);
+                if (isNaN(d.getTime())) return iso.substring(11, 19) || '--';
+                return d.toLocaleTimeString();
+            } catch(e) { return '--'; }
+        }
+
+        function timeSince(iso) {
+            if (!iso) return '--';
+            try {
+                var d = new Date(iso);
+                if (isNaN(d.getTime())) return '--';
+                var secs = Math.floor((Date.now() - d.getTime()) / 1000);
+                if (secs < 0) secs = 0;
+                if (secs < 60) return secs + 's ago';
+                if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+                return Math.floor(secs / 3600) + 'h ago';
+            } catch(e) { return '--'; }
+        }
+
+        function $(id) { return document.getElementById(id); }
+
+        function showBanner(show) {
+            $('conn-banner').style.display = show ? 'block' : 'none';
+        }
+
+        function fetchJSON(url) {
+            return fetch(url).then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            });
+        }
+
+        function postJSON(url) {
+            return fetch(url, { method: 'POST' }).then(function(r) {
+                return r.json();
+            });
+        }
+
+        /* ── Pollers ────────────────────────────────────── */
+
+        function pollStatus() {
+            fetchJSON('/api/status').then(function(d) {
+                showBanner(false);
+
+                $('uptime').textContent = d.uptime_human || '--';
+                $('last-scan').textContent = timeSince(d.last_scan_time);
+                $('scan-count').textContent = d.scan_count;
+                $('opps-today').textContent = d.opps_found_today;
+
+                var isDemo = d.environment === 'demo';
+                var badge = $('env-badge');
+                badge.textContent = isDemo ? 'DEMO' : 'PROD';
+                badge.className = 'badge ' + (isDemo ? 'badge-demo' : 'badge-prod');
+
+                killActive = d.kill_switch_active;
+                botRunning = !killActive;
+                var dot = $('status-dot');
+                dot.className = 'status-dot ' + (botRunning ? 'active' : 'stopped');
+                $('status-text').textContent = botRunning ? 'Running' : 'Stopped';
+
+                var btn = $('toggle-btn');
+                btn.textContent = botRunning ? 'STOP' : 'START';
+                btn.className = 'btn ' + (botRunning ? 'btn-danger' : 'btn-success');
+
+                $('env-btn').disabled = !killActive;
+
+                var dri = $('dry-run-ind');
+                dri.textContent = 'DRY RUN: ' + (d.dry_run ? 'ON' : 'OFF');
+                dri.className = 'indicator ' + (d.dry_run ? 'indicator-on' : 'indicator-off');
+
+            }).catch(function() { showBanner(true); });
+        }
+
+        function pollBalance() {
+            fetchJSON('/api/balance').then(function(d) {
+                $('balance').textContent = fmtUsd(d.balance_usd);
+                $('balance-sub').textContent =
+                    'Exposure: ' + fmtUsd(d.total_exposure_usd) +
+                    ' | Avail: ' + fmtUsd(d.available_usd);
+            }).catch(function() {});
+        }
+
+        function pollPositions() {
+            fetchJSON('/api/positions').then(function(d) {
+                var body = $('positions-body');
+                if (!d.positions || d.positions.length === 0) {
+                    body.innerHTML = '<tr class="empty-row"><td colspan="7">No open positions</td></tr>';
+                    return;
+                }
+                var html = '';
+                for (var i = 0; i < d.positions.length; i++) {
+                    var p = d.positions[i];
+                    html += '<tr>'
+                        + '<td class="mono">' + esc(p.ticker) + '</td>'
+                        + '<td>' + esc(p.title || '--') + '</td>'
+                        + '<td>' + esc((p.side || '').toUpperCase()) + '</td>'
+                        + '<td class="mono">' + p.count + '</td>'
+                        + '<td class="mono">' + p.avg_price_cents + '&cent;</td>'
+                        + '<td class="mono">' + (p.current_price_cents ? p.current_price_cents + '&cent;' : '--') + '</td>'
+                        + '<td class="mono ' + pnlClass(p.pnl_cents) + '">' + fmtCents(p.pnl_cents) + '</td>'
+                        + '</tr>';
+                }
+                body.innerHTML = html;
+            }).catch(function() {});
+        }
+
+        function pollTrades() {
+            fetchJSON('/api/trades').then(function(d) {
+                var body = $('trades-body');
+                if (!d.trades || d.trades.length === 0) {
+                    body.innerHTML = '<tr class="empty-row"><td colspan="8">No trades recorded</td></tr>';
+                    return;
+                }
+                var html = '';
+                for (var i = 0; i < d.trades.length; i++) {
+                    var t = d.trades[i];
+                    html += '<tr>'
+                        + '<td class="mono">' + fmtTime(t.timestamp) + '</td>'
+                        + '<td class="mono">' + esc(t.market_ticker) + '</td>'
+                        + '<td>' + esc((t.side || '').toUpperCase()) + '</td>'
+                        + '<td class="mono">' + t.price_cents + '&cent;</td>'
+                        + '<td class="mono">' + t.count + '</td>'
+                        + '<td>' + esc(t.status) + '</td>'
+                        + '<td class="mono">' + t.fees_cents + '&cent;</td>'
+                        + '<td class="text-muted">' + esc(t.notes || '') + '</td>'
+                        + '</tr>';
+                }
+                body.innerHTML = html;
+            }).catch(function() {});
+        }
+
+        function pollSignals() {
+            fetchJSON('/api/signals').then(function(d) {
+                var body = $('signals-body');
+                if (!d.signals || d.signals.length === 0) {
+                    body.innerHTML = '<tr class="empty-row"><td colspan="7">No signals detected</td></tr>';
+                    return;
+                }
+                var html = '';
+                for (var i = 0; i < d.signals.length; i++) {
+                    var s = d.signals[i];
+                    html += '<tr>'
+                        + '<td class="mono">' + fmtTime(s.timestamp) + '</td>'
+                        + '<td class="mono">' + esc(s.market_ticker) + '</td>'
+                        + '<td>' + esc(s.title || '') + '</td>'
+                        + '<td class="mono">' + s.yes_price_cents + '&cent;</td>'
+                        + '<td class="mono">' + s.no_price_cents + '&cent;</td>'
+                        + '<td class="mono pnl-pos">' + s.spread_cents + '&cent;</td>'
+                        + '<td>' + esc(s.action) + '</td>'
+                        + '</tr>';
+                }
+                body.innerHTML = html;
+            }).catch(function() {});
+        }
+
+        function pollDailyStats() {
+            fetchJSON('/api/daily-stats').then(function(d) {
+                var el = $('daily-pnl');
+                el.textContent = fmtCents(d.daily_pnl_cents);
+                el.className = 'stat-value mono ' + pnlClass(d.daily_pnl_cents);
+
+                var best = d.best_trade_cents ? fmtCents(d.best_trade_cents) : '--';
+                var worst = d.worst_trade_cents ? fmtCents(d.worst_trade_cents) : '--';
+                $('daily-pnl-sub').textContent = 'Best: ' + best + ' / Worst: ' + worst;
+
+                $('trades-today').textContent = d.daily_trades;
+                $('trades-sub').textContent = 'W: ' + d.win_count + ' / L: ' + d.loss_count;
+
+                var total = d.win_count + d.loss_count;
+                $('win-rate').textContent = total > 0 ? d.win_rate_percent.toFixed(1) + '%' : '--';
+                $('win-rate-sub').textContent = total > 0 ? total + ' closed trades' : 'No trades';
+            }).catch(function() {});
+        }
+
+        /* ── Controls ───────────────────────────────────── */
+
+        window.toggleBot = function() {
+            var url = botRunning ? '/api/kill' : '/api/resume';
+            postJSON(url).then(function() { pollStatus(); }).catch(function() {});
+        };
+
+        window.switchEnv = function() {
+            if (!killActive) return;
+            postJSON('/api/switch-env').then(function(r) {
+                if (r.success) pollStatus();
+            }).catch(function() {});
+        };
+
+        /* ── Init ───────────────────────────────────────── */
+
+        pollStatus();
+        pollBalance();
+        pollPositions();
+        pollTrades();
+        pollSignals();
+        pollDailyStats();
+
+        setInterval(pollStatus, 5000);
+        setInterval(pollPositions, 10000);
+        setInterval(pollTrades, 15000);
+        setInterval(pollSignals, 15000);
+        setInterval(pollBalance, 30000);
+        setInterval(pollDailyStats, 60000);
+
+    })();
+    </script>
+</body>
+</html>

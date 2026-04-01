@@ -2,7 +2,14 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Load .env first to check DRY_RUN
 load_dotenv()
+
+# If DRY_RUN is true, reload from test.env (demo environment) with override
+_dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+_test_env_path = Path(__file__).parent / "test.env"
+if _dry_run and _test_env_path.exists():
+    load_dotenv(_test_env_path, override=True)
 
 
 class Config:
